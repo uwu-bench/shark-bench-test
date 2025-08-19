@@ -1,9 +1,7 @@
 language: Java
 mode: Temurin
 version:
-  - '11'
-  - '17'
-  - '21'
+  - "21"
 version_regex:
   Dockerfile: 'ARG JAVA_VERSION=(\d+)'
   pom.xml: '<release>(\d+)<\/release>'
@@ -11,10 +9,10 @@ framework: Vert.x
 framework_website: https://vertx.io
 framework_flavor: Default
 framework_version:
-  - '4'
+  - "4"
 
 extended_warmup: true
 
 copy:
-  - 'vertx-4/MainVerticle.java': 'src/main/java/MainVerticle.java'
-  - 'vertx-4/pom.xml': 'pom.xml'
+  - "vertx-4/MainVerticle.java": "src/main/java/MainVerticle.java"
+  - "vertx-4/pom.xml": "pom.xml"

@@ -1,9 +1,0 @@
-language: Rust
-mode: Default
-version:
-  - '1.86'
-framework: Actix
-framework_website: https://actix.rs
-framework_flavor: Default
-framework_version:
-  - '4'

@@ -1,0 +1,46 @@
+[+] Running 2/2
+ ✔ Container benchmark                        Removed                                                                                                   0.4s
+ ✔ Image vertx-4-temurin-11-benchmark:latest  Removed                                                                                                   0.0s
+ -> Removed src/main/java/MainVerticle.java
+ -> Removed src/main/java
+ -> Removed src/main
+ -> Removed src
+ -> Removed pom.xml
+ -> Writing result:
+    - language: Java
+    - mode: Temurin
+    - version: 17
+    - framework: Vert.x
+    - framework_stdlib: false
+    - framework_website: https://vertx.io
+    - framework_flavor: Default
+    - framework_version: 4
+    - concurrency: 32
+    - path: java/vertx-4-temurin-11
+    - rps_median: 7402
+    - rps_p99: 7120
+    - latency_median: 4110
+    - latency_p99: 6603
+    - memory_median: 225758412
+    - memory_p99: 226492416
+    - errors: 0
+
+
+ -> Writing result:
+    - language: Rust
+    - mode: Default
+    - version: 1.86
+    - framework: Hyper
+    - framework_stdlib: false
+    - framework_website: https://hyper.rs
+    - framework_flavor: Default
+    - framework_version: 1
+    - concurrency: 32
+    - path: rust/hyper-1-rust-1.86
+    - rps_median: 8424
+    - rps_p99: 8042
+    - latency_median: 3780
+    - latency_p99: 5443
+    - memory_median: 78139883
+    - memory_p99: 78831943
+    - errors: 0

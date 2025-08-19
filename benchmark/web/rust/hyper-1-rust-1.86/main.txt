@@ -1,31 +1,55 @@
+
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, Uri};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
+use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::rc::Rc;
 
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::task::LocalSet;
 
-type HttpClient = Client<HttpConnector, Full<Bytes>>;
+#[derive(Debug)]
+enum AppError {
+    Io(std::io::Error),
+    Network(reqwest::Error),
+    Json(serde_json::Error),
+    NotFound,
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(err: std::io::Error) -> Self {
+        AppError::Io(err)
+    }
+}
+
+impl From<reqwest::Error> for AppError {
+    fn from(err: reqwest::Error) -> Self {
+        AppError::Network(err)
+    }
+}
+
+impl From<serde_json::Error> for AppError {
+    fn from(err: serde_json::Error) -> Self {
+        AppError::Json(err)
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), AppError> {
     let local = LocalSet::new();
 
     local
         .run_until(async move {
-            let client: Rc<HttpClient> =
-                Rc::new(Client::builder(hyper_util::rt::TokioExecutor::new()).build_http());
+            let client: Rc<Client> = Rc::new(Client::new());
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
             loop {
@@ -61,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 async fn handle_request(
-    client: Rc<HttpClient>,
+    client: Rc<Client>,
     request: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let path: &str = request.uri().path();
@@ -95,7 +119,13 @@ async fn handle_request(
 
     let response_body = match path {
         "/api/v1/periodic-table/element" => match get_element(client, &symbol).await {
-            Ok(data) => data,
+            Ok(data) => data.into_bytes(),
+            Err(AppError::NotFound) => {
+                return Ok(Response::builder()
+                    .status(404)
+                    .body(Full::new(Bytes::from_static(b"404 Element Not Found")))
+                    .unwrap());
+            }
             Err(e) => {
                 eprintln!("Error getting element: {:?}", e);
                 return Ok(Response::builder()
@@ -105,7 +135,13 @@ async fn handle_request(
             }
         },
         "/api/v1/periodic-table/shells" => match get_shells(client, &symbol).await {
-            Ok(data) => data,
+            Ok(data) => data.into_bytes(),
+            Err(AppError::NotFound) => {
+                return Ok(Response::builder()
+                    .status(404)
+                    .body(Full::new(Bytes::from_static(b"404 Shells Not Found")))
+                    .unwrap());
+            }
             Err(e) => {
                 eprintln!("Error getting shells: {:?}", e);
                 return Ok(Response::builder()
@@ -125,50 +161,40 @@ async fn handle_request(
     Ok(Response::new(Full::new(Bytes::from(response_body))))
 }
 
-async fn get_element(
-    client: Rc<HttpClient>,
-    symbol: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let uri: Uri = "http://web-data-source/element.json".parse()?;
-    let req = Request::builder()
-        .method("GET")
-        .uri(uri)
-        .body(Full::new(Bytes::new()))?;
+async fn get_element(client: Rc<Client>, symbol: &str) -> Result<String, AppError> {
+    let json: HashMap<String, DataSourceElement> = client
+        .get("http://web-data-source/element.json")
+        .send()
+        .await?
+        .json()
+        .await?;
 
-    let res = client.request(req).await?;
-    let body_bytes = res.into_body().collect().await?.to_bytes();
-
-    let json: HashMap<String, DataSourceElement> = serde_json::from_slice(&body_bytes)?;
-    let entry = json.get(symbol).ok_or("Element not found")?;
+    let entry = json.get(symbol).ok_or(AppError::NotFound)?;
 
     let response = ElementResponse {
-        name: entry.name.to_owned(),
+        name: entry.name.clone(),
         number: entry.number,
         group: entry.group,
     };
 
-    Ok(serde_json::to_vec(&response)?)
+    Ok(serde_json::to_string(&response)?)
 }
 
-async fn get_shells(
-    client: Rc<HttpClient>,
-    symbol: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let uri: Uri = "http://web-data-source/shells.json".parse()?;
-    let req = Request::builder()
-        .method("GET")
-        .uri(uri)
-        .body(Full::new(Bytes::new()))?;
+async fn get_shells(client: Rc<Client>, symbol: &str) -> Result<String, AppError> {
+    let json: HashMap<String, Vec<u8>> = client
+        .get("http://web-data-source/shells.json")
+        .send()
+        .await?
+        .json()
+        .await?;
 
-    let res = client.request(req).await?;
-    let body_bytes = res.into_body().collect().await?.to_bytes();
+    let shells = json.get(symbol).ok_or(AppError::NotFound)?;
 
-    let json: HashMap<String, Vec<u8>> = serde_json::from_slice(&body_bytes)?;
-    let shells = json.get(symbol).ok_or("Shells data not found")?;
+    let response = ShellsResponse {
+        shells: shells.clone(),
+    };
 
-    let response = ShellsResponse { shells: shells };
-
-    Ok(serde_json::to_vec(&response)?)
+    Ok(serde_json::to_string(&response)?)
 }
 
 #[derive(Serialize)]
@@ -179,8 +205,8 @@ struct ElementResponse {
 }
 
 #[derive(Serialize)]
-struct ShellsResponse<'shell> {
-    shells: &'shell Vec<u8>,
+struct ShellsResponse {
+    shells: Vec<u8>,
 }
 
 #[derive(Deserialize, Debug)]
