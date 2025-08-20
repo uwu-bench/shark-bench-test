@@ -6,20 +6,45 @@ use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, Uri};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
+use serde::{Deserialize, Serialize};
+use smallstr::SmallString;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::rc::Rc;
-
-use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::task::LocalSet;
 
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
+#[derive(Debug, Error)]
+enum AppError {
+    #[error("HTTP error: {0}")]
+    Http(#[from] hyper::Error),
+
+    #[error("Serde error: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("Invalid URI: {0}")]
+    Uri(#[from] hyper::http::uri::InvalidUri),
+
+    #[error("HTTP request build error: {0}")]
+    RequestBuild(#[from] hyper::http::Error),
+
+    #[error("Body error: {0}")]
+    Body(#[from] hyper_util::client::legacy::Error),
+
+    #[error("Element not found")]
+    ElementNotFound,
+
+    #[error("Shells not found")]
+    ShellsNotFound,
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), AppError> {
     let local = LocalSet::new();
 
     local
@@ -31,8 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             loop {
                 let (stream, _) = match listener.accept().await {
                     Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("accept error: {:?}", e);
+                    Err(_) => {
                         continue;
                     }
                 };
@@ -40,7 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let client_ref = client.clone();
 
                 tokio::task::spawn_local(async move {
-                    if let Err(err) = http1::Builder::new()
+                    http1::Builder::new()
+                        .auto_date_header(false)
+                        .pipeline_flush(true)
                         .serve_connection(
                             io,
                             service_fn(|request: Request<hyper::body::Incoming>| {
@@ -49,9 +75,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }),
                         )
                         .await
-                    {
-                        eprintln!("Error serving connection: {:?}", err);
-                    }
                 });
             }
         })
@@ -73,62 +96,49 @@ async fn handle_request(
             .unwrap());
     }
 
-    let symbol: Option<String> = request.uri().query().and_then(|query| {
-        query.split('&').find_map(|q| {
-            let mut split = q.split('=');
-            let key = split.next()?;
-            let value = split.next()?;
+    let query = request.uri().query().unwrap_or("");
+    for q in query.split('&') {
+        let mut split = q.split('=');
+        if let (Some(key), Some(value)) = (split.next(), split.next()) {
             if key == "symbol" {
-                Some(value.to_owned())
-            } else {
-                None
+                let response_body = match path {
+                    "/api/v1/periodic-table/element" => match get_element(client, value).await {
+                        Ok(data) => data,
+                        Err(_) => {
+                            return Ok(Response::builder()
+                                .status(500)
+                                .body(Full::new(Bytes::from_static(b"500 Internal Server Error")))
+                                .unwrap());
+                        }
+                    },
+                    "/api/v1/periodic-table/shells" => match get_shells(client, value).await {
+                        Ok(data) => data,
+                        Err(_) => {
+                            return Ok(Response::builder()
+                                .status(500)
+                                .body(Full::new(Bytes::from_static(b"500 Internal Server Error")))
+                                .unwrap());
+                        }
+                    },
+                    _ => {
+                        return Ok(Response::builder()
+                            .status(404)
+                            .body(Full::new(Bytes::from_static(b"404 Not Found")))
+                            .unwrap());
+                    }
+                };
+                return Ok(Response::new(Full::new(Bytes::from(response_body))));
             }
-        })
-    });
-
-    let Some(symbol) = symbol else {
-        return Ok(Response::builder()
-            .status(400)
-            .body(Full::new(Bytes::from_static(b"400 Bad Request")))
-            .unwrap());
-    };
-
-    let response_body = match path {
-        "/api/v1/periodic-table/element" => match get_element(client, &symbol).await {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("Error getting element: {:?}", e);
-                return Ok(Response::builder()
-                    .status(500)
-                    .body(Full::new(Bytes::from_static(b"500 Internal Server Error")))
-                    .unwrap());
-            }
-        },
-        "/api/v1/periodic-table/shells" => match get_shells(client, &symbol).await {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("Error getting shells: {:?}", e);
-                return Ok(Response::builder()
-                    .status(500)
-                    .body(Full::new(Bytes::from_static(b"500 Internal Server Error")))
-                    .unwrap());
-            }
-        },
-        _ => {
-            return Ok(Response::builder()
-                .status(404)
-                .body(Full::new(Bytes::from_static(b"404 Not Found")))
-                .unwrap());
         }
-    };
+    }
 
-    Ok(Response::new(Full::new(Bytes::from(response_body))))
+    Ok(Response::builder()
+        .status(400)
+        .body(Full::new(Bytes::from_static(b"400 Bad Request")))
+        .unwrap())
 }
 
-async fn get_element(
-    client: Rc<HttpClient>,
-    symbol: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+async fn get_element(client: Rc<HttpClient>, symbol: &str) -> Result<Vec<u8>, AppError> {
     let uri: Uri = "http://web-data-source/element.json".parse()?;
     let req = Request::builder()
         .method("GET")
@@ -138,8 +148,9 @@ async fn get_element(
     let res = client.request(req).await?;
     let body_bytes = res.into_body().collect().await?.to_bytes();
 
-    let json: HashMap<String, DataSourceElement> = serde_json::from_slice(&body_bytes)?;
-    let entry = json.get(symbol).ok_or("Element not found")?;
+    let json: HashMap<SmallString<[u8; 8]>, DataSourceElement> =
+        serde_json::from_slice(&body_bytes)?;
+    let entry = json.get(symbol).ok_or(AppError::ElementNotFound)?;
 
     let response = ElementResponse {
         name: entry.name.to_owned(),
@@ -150,10 +161,7 @@ async fn get_element(
     Ok(serde_json::to_vec(&response)?)
 }
 
-async fn get_shells(
-    client: Rc<HttpClient>,
-    symbol: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+async fn get_shells(client: Rc<HttpClient>, symbol: &str) -> Result<Vec<u8>, AppError> {
     let uri: Uri = "http://web-data-source/shells.json".parse()?;
     let req = Request::builder()
         .method("GET")
@@ -163,8 +171,9 @@ async fn get_shells(
     let res = client.request(req).await?;
     let body_bytes = res.into_body().collect().await?.to_bytes();
 
-    let json: HashMap<String, Vec<u8>> = serde_json::from_slice(&body_bytes)?;
-    let shells = json.get(symbol).ok_or("Shells data not found")?;
+    let json: HashMap<SmallString<[u8; 8]>, Vec<u8>> = serde_json::from_slice(&body_bytes)?;
+
+    let shells = json.get(symbol).ok_or(AppError::ShellsNotFound)?;
 
     let response = ShellsResponse { shells: shells };
 
@@ -173,9 +182,9 @@ async fn get_shells(
 
 #[derive(Serialize)]
 struct ElementResponse {
-    name: String,
     number: u8,
     group: u8,
+    name: SmallString<[u8; 24]>,
 }
 
 #[derive(Serialize)]
@@ -185,7 +194,7 @@ struct ShellsResponse<'shell> {
 
 #[derive(Deserialize, Debug)]
 struct DataSourceElement {
-    name: String,
     number: u8,
     group: u8,
+    name: SmallString<[u8; 24]>,
 }
